@@ -1,83 +1,58 @@
+import { readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { defaultMaxThreads } from "@linked-realms/miner";
-import { isAddress, type Address } from "viem";
-
+import { resolve } from "node:path";
+import {
+  isAgentKey,
+  localTestAdjacency,
+  MAX_ADJACENCY_BYTES,
+  parseAdjacencyJson,
+  TEST_PLAYER_KEY,
+  type AgentKey,
+  type LandAdjacency,
+} from "@linked-realms/shared";
 export interface Config {
-  landId: number;
   port: number;
-  /** Interface to listen on: loopback by default, because the relay agent connects locally. */
-  host: string;
-  /** Without it the Land is reachable only directly (development). */
-  relayUrl: string | undefined;
-  /** The Hub address whose Travel tickets this server accepts. */
-  hubTicketSigner: Address;
-  rpcUrl: string;
-  chainId: number;
+  host: "127.0.0.1";
   mapFile: string;
-  miningKeyFile: string;
-  miningMaxThreads: number;
+  dataDir: string;
+  ownerPlayerKey: AgentKey;
+  adjacency: LandAdjacency;
 }
-
-const DEFAULT_MAP_FILE = fileURLToPath(
-  new URL("../../../maps/empty-land.json", import.meta.url),
-);
-// .data/ is gitignored at the repo root
-const DEFAULT_MINING_KEY_FILE = fileURLToPath(
-  new URL("../.data/mining-key", import.meta.url),
-);
-
-function integer(
-  env: NodeJS.ProcessEnv,
-  name: string,
-  fallback: number | undefined,
-  min: number,
-  max: number,
-): number {
-  const raw = env[name];
-  if (raw === undefined || raw === "") {
-    if (fallback === undefined) throw new Error(`${name} is required`);
-    return fallback;
-  }
-  const value = Number(raw);
-  if (!/^\d+$/.test(raw) || value < min || value > max)
-    throw new Error(
-      `${name} must be an integer in [${min}, ${max}], got "${raw}"`,
-    );
-  return value;
-}
-
-/** Reads and validates the environment; throws with a clear message on bad input. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const rpcUrl = env.RPC_URL || "http://127.0.0.1:8545";
-  try {
-    new URL(rpcUrl);
-  } catch {
-    throw new Error(`RPC_URL is not a valid URL: "${rpcUrl}"`);
+  if (env.NODE_ENV === "production")
+    throw new Error(
+      "The agent-key test adapter cannot run in production; G4 admission is required",
+    );
+  if (env.HOST && env.HOST !== "127.0.0.1")
+    throw new Error("The test adapter requires HOST=127.0.0.1");
+  const raw = env.LAND_COLYSEUS_PORT || "2567";
+  const port = Number(raw);
+  if (!/^\d+$/.test(raw) || port < 1 || port > 65535)
+    throw new Error("Invalid LAND_COLYSEUS_PORT");
+  const ownerPlayerKey = env.LAND_OWNER_PLAYER_KEY || TEST_PLAYER_KEY;
+  if (!isAgentKey(ownerPlayerKey))
+    throw new Error("Invalid LAND_OWNER_PLAYER_KEY");
+  let adjacency = localTestAdjacency();
+  if (env.LAND_ADJACENCY_FILE) {
+    if (statSync(env.LAND_ADJACENCY_FILE).size > MAX_ADJACENCY_BYTES)
+      throw new Error("Land adjacency is too large");
+    adjacency = parseAdjacencyJson(
+      readFileSync(env.LAND_ADJACENCY_FILE, "utf8"),
+    );
   }
-  const relayUrl = env.RELAY_URL || undefined;
-  if (relayUrl !== undefined && !/^wss?:\/\//.test(relayUrl))
-    throw new Error(`RELAY_URL must be a ws:// or wss:// URL: "${relayUrl}"`);
-  const signer = env.HUB_TICKET_SIGNER;
-  if (!signer) throw new Error("HUB_TICKET_SIGNER is required");
-  if (!isAddress(signer, { strict: false }))
-    throw new Error(`HUB_TICKET_SIGNER is not an address: "${signer}"`);
   return {
-    // uint32 is the room state type of landId
-    landId: integer(env, "LAND_ID", undefined, 1, 2 ** 32 - 1),
-    port: integer(env, "PORT", 2567, 1, 65535),
-    host: env.HOST || "127.0.0.1",
-    relayUrl,
-    hubTicketSigner: signer,
-    rpcUrl,
-    chainId: integer(env, "CHAIN_ID", 31337, 1, Number.MAX_SAFE_INTEGER),
-    mapFile: env.MAP_FILE || DEFAULT_MAP_FILE,
-    miningKeyFile: env.MINING_KEY_FILE || DEFAULT_MINING_KEY_FILE,
-    miningMaxThreads: integer(
-      env,
-      "MINING_MAX_THREADS",
-      defaultMaxThreads(),
-      1,
-      256,
+    port,
+    host: "127.0.0.1",
+    ownerPlayerKey,
+    adjacency,
+    dataDir: resolve(
+      env.LAND_DATA_DIR ||
+        fileURLToPath(
+          new URL("../../../.data/" + adjacency.landKey + "/", import.meta.url),
+        ),
     ),
+    mapFile:
+      env.MAP_FILE ||
+      fileURLToPath(new URL("../../../maps/empty-land.json", import.meta.url)),
   };
 }

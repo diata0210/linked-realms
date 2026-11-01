@@ -1,9 +1,9 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>linked-realms</title>
+    <title>linked-realms · local test</title>
     <style>
       html,
       body {
@@ -19,95 +19,50 @@
         position: fixed;
         inset: 0;
       }
-      #panel,
-      #hud {
+      #panel {
         position: fixed;
         z-index: 1;
-        background: rgba(0, 0, 0, 0.8);
-        border: 1px solid #555;
-        border-radius: 6px;
-        padding: 10px 12px;
-      }
-      #panel {
         top: 12px;
         left: 12px;
-        width: 300px;
+        max-width: 340px;
+        padding: 12px;
+        background: rgba(0, 0, 0, 0.85);
+        border: 1px solid #555;
+        border-radius: 6px;
       }
-      #hud {
-        top: 12px;
-        right: 12px;
-      }
-      #panel h1 {
+      h1 {
+        font-size: 18px;
         margin: 0 0 8px;
-        font-size: 16px;
       }
-      #panel p {
-        margin: 4px 0;
-      }
-      #panel table {
-        border-collapse: collapse;
+      p {
         margin: 6px 0;
       }
-      #panel td {
-        padding: 1px 12px 1px 0;
+      button {
+        padding: 6px 12px;
       }
-      #panel button {
-        margin: 6px 6px 0 0;
-        padding: 4px 10px;
-      }
-      #hud-notice {
-        color: #fc6;
-      }
-      #hud {
-        max-width: 320px;
+      #notice {
+        color: #f2c230;
         overflow-wrap: anywhere;
-      }
-      #status {
-        color: #9cf;
-      }
-      #error {
-        color: #f88;
-        overflow-wrap: anywhere;
-      }
-      [hidden] {
-        display: none !important;
       }
     </style>
   </head>
   <body>
     <div id="game"></div>
-    <div id="hud" hidden>
-      <div id="hud-land"></div>
-      <div id="hud-mine"></div>
-      <div id="hud-notice"></div>
-      <div id="mine-controls" hidden>
-        <button id="mine-toggle"></button>
-        <label
-          >threads
-          <input
-            id="mine-threads"
-            type="number"
-            min="1"
-            step="1"
-            value="1"
-            style="width: 4em"
-        /></label>
-      </div>
-      <div id="land-tools">
-        <input id="report-reason" placeholder="Reason" style="width: 12em" />
-        <button id="report">Report this Land</button>
-        <div id="report-result"></div>
-      </div>
-    </div>
-    <div id="panel">
+    <section id="panel">
       <h1>linked-realms</h1>
-      <p id="wallet">No wallet connected.</p>
-      <div id="actions"></div>
-      <div id="character"></div>
-      <div id="directory"></div>
-      <p id="status"></p>
-      <p id="error"></p>
-    </div>
+      <p>Local test · fake identity</p>
+      <p id="identity"></p>
+      <p id="gold">Gold unavailable</p>
+      <p>
+        Mining disabled. New players start with all stats at 1 and empty
+        inventory. Stats and inventory are saved on this Land.
+      </p>
+      <button id="enter">Enter local Land</button>
+      <button id="leave" disabled>Leave</button>
+      <p id="status" role="status">Ready</p>
+      <p>Move with WASD or arrow keys.</p>
+      <p id="notice" role="status"></p>
+    </section>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

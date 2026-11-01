@@ -1,82 +1,57 @@
-import { describe, expect, it } from "vitest";
-import { defaultMaxThreads } from "@linked-realms/miner";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { expect, it } from "vitest";
+import { TEST_LAND_KEY, TEST_PLAYER_KEY } from "@linked-realms/shared";
 import { loadConfig } from "./config.ts";
-
-const SIGNER = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
-const base = { HUB_TICKET_SIGNER: SIGNER };
-
-describe("loadConfig", () => {
-  it("applies defaults", () => {
-    const config = loadConfig({ ...base, LAND_ID: "3" });
-    expect(config).toMatchObject({
-      landId: 3,
-      port: 2567,
-      host: "127.0.0.1",
-      relayUrl: undefined,
-      hubTicketSigner: SIGNER,
-      rpcUrl: "http://127.0.0.1:8545",
-      chainId: 31337,
-    });
-    expect(config.mapFile).toMatch(/maps\/empty-land\.json$/);
-    expect(config.miningKeyFile).toMatch(
-      /packages\/map-server\/\.data\/mining-key$/,
-    );
-    expect(config.miningMaxThreads).toBe(defaultMaxThreads());
+it("loads local world defaults with an empty environment", () => {
+  expect(loadConfig({})).toMatchObject({
+    port: 2567,
+    host: "127.0.0.1",
+    ownerPlayerKey: TEST_PLAYER_KEY,
+    adjacency: { version: 1, landKey: TEST_LAND_KEY, neighbors: {} },
   });
+});
+it("loads the shared fixture as LAND_ADJACENCY_FILE", () => {
+  const path = fileURLToPath(
+    new URL("../../shared/fixtures/two-lands/land-a.json", import.meta.url),
+  );
+  expect(
+    loadConfig({ LAND_ADJACENCY_FILE: path }).adjacency.neighbors.east,
+  ).toBe("bb".repeat(32));
+});
+it.each([
+  { NODE_ENV: "production" },
+  { HOST: "0.0.0.0" },
+  { LAND_COLYSEUS_PORT: "0" },
+  { LAND_COLYSEUS_PORT: "65536" },
+  { LAND_COLYSEUS_PORT: "1.5" },
+  { LAND_OWNER_PLAYER_KEY: "0x1234" },
+])("fails before listening with %j", (env) => {
+  expect(() => loadConfig(env)).toThrow();
+});
+it("rejects duplicate, malformed and oversized config files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "g1-adjacency-"));
+  try {
+    const path = join(dir, "land.json");
+    for (const text of [
+      "{}",
+      " ".repeat(2049),
+      `{"version":2,"version":1,"landKey":"${TEST_LAND_KEY}","neighbors":{}}`,
+    ]) {
+      writeFileSync(path, text);
+      expect(() => loadConfig({ LAND_ADJACENCY_FILE: path })).toThrow();
+    }
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
 
-  it("reads overrides", () => {
-    const config = loadConfig({
-      LAND_ID: "9",
-      PORT: "2601",
-      HOST: "0.0.0.0",
-      RELAY_URL: "wss://relay.test",
-      HUB_TICKET_SIGNER: SIGNER,
-      RPC_URL: "http://rpc.test",
-      CHAIN_ID: "84532",
-      MAP_FILE: "/tmp/m.json",
-      MINING_KEY_FILE: "/tmp/key",
-      MINING_MAX_THREADS: "3",
-    });
-    expect(config).toEqual({
-      landId: 9,
-      port: 2601,
-      host: "0.0.0.0",
-      relayUrl: "wss://relay.test",
-      hubTicketSigner: SIGNER,
-      rpcUrl: "http://rpc.test",
-      chainId: 84532,
-      mapFile: "/tmp/m.json",
-      miningKeyFile: "/tmp/key",
-      miningMaxThreads: 3,
-    });
-  });
-
-  it.each([
-    [base, /LAND_ID is required/],
-    [{ LAND_ID: "1" }, /HUB_TICKET_SIGNER is required/],
-    [
-      { ...base, LAND_ID: "1", HUB_TICKET_SIGNER: "0x12" },
-      /HUB_TICKET_SIGNER is not/,
-    ],
-    [{ ...base, LAND_ID: "1", RELAY_URL: "nope" }, /RELAY_URL must be/],
-    [{ ...base, LAND_ID: "1", RELAY_URL: "http://r" }, /RELAY_URL must be/],
-    [{ ...base, LAND_ID: "0" }, /LAND_ID must be/],
-    [{ ...base, LAND_ID: "-1" }, /LAND_ID must be/],
-    [{ ...base, LAND_ID: "1.5" }, /LAND_ID must be/],
-    [{ ...base, LAND_ID: "abc" }, /LAND_ID must be/],
-    [{ ...base, LAND_ID: "4294967296" }, /LAND_ID must be/],
-    [{ ...base, LAND_ID: "1", PORT: "70000" }, /PORT must be/],
-    [{ ...base, LAND_ID: "1", CHAIN_ID: "x" }, /CHAIN_ID must be/],
-    [
-      { ...base, LAND_ID: "1", MINING_MAX_THREADS: "0" },
-      /MINING_MAX_THREADS must be/,
-    ],
-    [
-      { ...base, LAND_ID: "1", MINING_MAX_THREADS: "x" },
-      /MINING_MAX_THREADS must be/,
-    ],
-    [{ ...base, LAND_ID: "1", RPC_URL: "nope" }, /RPC_URL is not a valid URL/],
-  ])("rejects %j", (env, message) => {
-    expect(() => loadConfig(env)).toThrow(message);
-  });
+it("isolates the default data directory by Land key and accepts an explicit directory", () => {
+  const own = loadConfig({});
+  expect(own.dataDir).toContain(TEST_LAND_KEY);
+  expect(loadConfig({ LAND_DATA_DIR: "custom-land-data" }).dataDir).toBe(
+    resolve("custom-land-data"),
+  );
 });

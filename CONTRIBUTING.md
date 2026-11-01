@@ -1,11 +1,12 @@
 # Contributing
 
-Thanks for your interest in linked-realms.
+The project owner reviews and merges every pull request. Nothing reaches `main` without a pull request.
 
-- The project owner reviews and merges every pull request. Nothing reaches `main` without a pull request.
-- Read [PLAN.md](PLAN.md) sections 2 (principles), 3 (architecture) and 5 (rules) first. A change that conflicts with a principle in section 2 will not be merged; open an issue to discuss it instead.
-- Use the terms defined in [CONTEXT.md](CONTEXT.md).
-- Everything in the repository is written in English: code, comments, documentation and commit messages ([Conventional Commits](https://www.conventionalcommits.org/)).
-- New code comes with tests. Before opening a pull request, run `pnpm test` and `forge test` (inside `contracts/`).
-- Never commit secrets or private keys. Sample environment variables go in `.env.example`.
-- Testnet only: do not add mainnet deployment configuration.
+- Read [Connect G1](docs/connect-g1.md) and [CONTEXT.md](CONTEXT.md). Older EVM plans/ADRs are historical; do not restore their authority or startup dependencies.
+- Keep code, comments and documentation in English.
+- Run `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` and both SDK smoke commands in the README.
+- New behavior needs meaningful tests. Keep map/input limits, configured owner authority and voluntary resource use.
+- Never commit seeds, private keys or credentials. Use synthetic public identifiers for local fixtures.
+- No gold ledger, local balance fallback or mint path. C4 supplies chain integration through the gold seam.
+- Public game builds must not import private Hub source. G4 must pin the public Connect package, without copying its codecs.
+- Do not deploy or merge without the owner's instruction.

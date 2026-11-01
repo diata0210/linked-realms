@@ -4,92 +4,43 @@ import {
   Messages,
   SERVER_TICK_HZ,
   parseInputMessage,
-  gateDirection,
-  gateSpawn,
-  parseMiningMessage,
   spawnPosition,
   step,
-  verifyTravelTicket,
-  JoinRejected,
+  testAgentIdentity,
+  type AgentKey,
+  type LandAdjacency,
   type LandMap,
   type LandMessage,
   type MapMessage,
   type MoveInput,
 } from "@linked-realms/shared";
-import type { Miner } from "@linked-realms/miner";
-import type { Address } from "viem";
-import type { LandInfo } from "./chain.ts";
-
-// Field names match PlayerStateShape in shared/src/protocol.ts.
+import { initialPlayerState, type LandStore } from "./land-store.ts";
 export const PlayerState = schema(
   {
-    address: t.string(),
+    playerKey: t.string(),
     x: t.float32(),
     y: t.float32(),
     isOwner: t.boolean(),
+    stats: t.map("uint32"),
+    inventory: t.map("uint32"),
   },
   "PlayerState",
 );
 export type PlayerState = SchemaType<typeof PlayerState>;
-
-// Field names match MiningStateShape in shared/src/protocol.ts.
-export const MiningState = schema(
-  {
-    on: t.boolean(),
-    threads: t.uint16(),
-    hashRate: t.float64(),
-    round: t.float64(),
-    submitted: t.uint32(),
-    won: t.uint32(),
-  },
-  "MiningState",
-);
-export type MiningState = SchemaType<typeof MiningState>;
-
 export const LandState = schema(
-  {
-    landId: t.uint32(),
-    players: t.map(PlayerState),
-    mining: t.ref(MiningState),
-  },
+  { landKey: t.string(), players: t.map(PlayerState) },
   "LandState",
 );
 export type LandState = SchemaType<typeof LandState>;
-
 export interface LandRoomOptions {
-  landId: number;
-  /** The validated map and the text it was parsed from (sent to clients as is). */
   map: LandMap;
   mapText: string;
-  /** Read once at start-up: a Land is soulbound, so its owner never changes. */
-  land: LandInfo;
-  /** Travel tickets must be signed by this Hub address (verified offline). */
-  hubSigner: Address;
-  chainId: number;
-  /** Lives as long as the process, not the room: mining goes on while the Land is empty. */
-  mining: Pick<Miner, "start" | "stop" | "status">;
+  adjacency: LandAdjacency;
+  ownerPlayerKey: AgentKey;
+  store?: LandStore;
 }
-
-// Tests replace the clock here. It is not a room option: options are shallow-merged with
-// client-supplied ones, so anything optional there could be set by an anonymous client.
 export const clock = { now: (): number => Date.now() };
-
-// Rooms are created before onAuth runs, so any client could otherwise open extra rooms:
-// unauthenticated resource use, and the same address in two rooms. One Land = one room.
 const liveRooms = new Set<unknown>();
-
-// Ticket nonces already used, with their expiry: an expired ticket is rejected anyway, so a
-// nonce can be forgotten then. Per process, not per room: the room may be recreated.
-const usedNonces = new Map<string, bigint>();
-
-interface Arrival {
-  address: Address;
-  gate: number;
-}
-
-const MINING_REFRESH_MS = 500;
-
-// Input and mining messages share one per-session budget.
 export const MAX_INPUTS_PER_SECOND = 30;
 const NO_INPUT: MoveInput = {
   up: false,
@@ -97,85 +48,61 @@ const NO_INPUT: MoveInput = {
   left: false,
   right: false,
 };
-
 interface Session {
   input: MoveInput;
   windowStart: number;
   windowCount: number;
 }
-
 export class LandRoom extends Room<{ state: LandState }> {
   override maxClients = 64;
   #options!: LandRoomOptions;
   #sessions = new Map<string, Session>();
-
   override onCreate(options: LandRoomOptions): void {
-    if (liveRooms.size > 0) throw new ServerError(4403, "room already exists");
+    if (liveRooms.size > 0) throw new ServerError(403, "room already exists");
     liveRooms.add(this);
     this.#options = options;
     this.state = new LandState();
-    this.state.landId = options.landId;
-    this.state.mining = new MiningState();
-    this.#refreshMining();
+    this.state.landKey = options.adjacency.landKey;
     this.onMessage(Messages.input, (client, message) =>
       this.#onInput(client, message),
-    );
-    this.onMessage(Messages.mining, (client, message) =>
-      this.#onMining(client, message),
     );
     this.setSimulationInterval(
       (dtMs) => this.#tick(dtMs),
       1000 / SERVER_TICK_HZ,
     );
-    this.clock.setInterval(() => this.#refreshMining(), MINING_REFRESH_MS);
   }
-
-  override async onAuth(
+  override onAuth(
     _client: Client,
-    joinOptions: { ticket?: unknown; signature?: unknown },
-  ): Promise<Arrival> {
-    const { landId, hubSigner, chainId } = this.#options;
+    joinOptions: unknown,
+  ): { playerKey: AgentKey } {
+    let playerKey: AgentKey;
     try {
-      const nowSeconds = Math.floor(clock.now() / 1000);
-      const ticket = await verifyTravelTicket({
-        ticket: joinOptions?.ticket,
-        signature: joinOptions?.signature,
-        hubSigner,
-        chainId,
-        landId,
-        nowSeconds,
-      });
-      // No await from here on, so two joins with one ticket cannot both pass.
-      for (const [nonce, expiresAt] of usedNonces)
-        if (expiresAt <= BigInt(nowSeconds)) usedNonces.delete(nonce);
-      const nonce = ticket.nonce.toLowerCase();
-      if (usedNonces.has(nonce)) throw new JoinRejected("ticket already used");
-      if (this.#playerOf(ticket.player))
-        throw new JoinRejected("already in this Land");
-      usedNonces.set(nonce, ticket.expiresAt);
-      return { address: ticket.player, gate: ticket.gate };
-    } catch (error) {
-      // Never leak stack traces or internals to an untrusted client.
-      if (error instanceof JoinRejected)
-        throw new ServerError(4401, error.message);
-      console.error("join check failed:", error);
-      throw new ServerError(4500, "could not verify the ticket");
+      playerKey = testAgentIdentity(joinOptions);
+    } catch {
+      throw new ServerError(4401, "Invalid test player key");
     }
-  }
-
-  override onJoin(client: Client): void {
-    const { address: signer, gate } = client.auth as Arrival;
-    // Re-checked here because two onAuth calls for one address can interleave.
-    if (this.#playerOf(signer))
+    if (this.#playerOf(playerKey))
       throw new ServerError(4401, "already in this Land");
-    const { map, mapText, land, landId } = this.#options;
-    const direction = gateDirection(gate);
-    const spawn = direction ? gateSpawn(map, direction) : spawnPosition(map);
+    return { playerKey };
+  }
+  override onJoin(client: Client): void {
+    const { playerKey } = client.auth as { playerKey: AgentKey };
+    if (this.#playerOf(playerKey))
+      throw new ServerError(4401, "already in this Land");
+    const { map, mapText, adjacency, ownerPlayerKey } = this.#options;
+    // G1 has no verified source-Land hint. Never trust client arrival/adjacency claims.
+    const spawn = spawnPosition(map);
     const player = new PlayerState();
-    player.address = signer;
+    player.playerKey = playerKey;
     player.x = spawn.x;
     player.y = spawn.y;
-    player.isOwner = signer.toLowerCase() === land.owner.toLowerCase();
+    player.isOwner = playerKey === ownerPlayerKey;
+    const stored =
+      this.#options.store?.loadOrCreate(playerKey) ?? initialPlayerState();
+    for (const [key, value] of Object.entries(stored.stats))
+      player.stats.set(key, value);
+    for (const [key, value] of Object.entries(stored.inventory))
+      player.inventory.set(key, value);
     this.state.players.set(client.sessionId, player);
     this.#sessions.set(client.sessionId, {
       input: NO_INPUT,
@@ -183,30 +110,33 @@ export class LandRoom extends Room<{ state: LandState }> {
       windowCount: 0,
     });
     client.send(Messages.map, { tiled: mapText } satisfies MapMessage);
-    client.send(Messages.land, {
-      landId,
-      owner: land.owner,
-      x: land.x,
-      y: land.y,
-    } satisfies LandMessage);
+    client.send(Messages.land, adjacency satisfies LandMessage);
   }
-
   override onDispose(): void {
-    liveRooms.delete(this);
+    try {
+      for (const player of this.state?.players.values() ?? [])
+        this.#savePlayer(player);
+    } finally {
+      liveRooms.delete(this);
+    }
   }
-
   override onLeave(client: Client): void {
+    const player = this.state.players.get(client.sessionId);
+    if (player) this.#savePlayer(player);
     this.state.players.delete(client.sessionId);
     this.#sessions.delete(client.sessionId);
   }
-
-  #playerOf(address: string): PlayerState | undefined {
-    const lower = address.toLowerCase();
+  #savePlayer(player: PlayerState): void {
+    this.#options.store?.save(player.playerKey, {
+      stats: Object.fromEntries(player.stats),
+      inventory: Object.fromEntries(player.inventory),
+    });
+  }
+  #playerOf(key: AgentKey): PlayerState | undefined {
     for (const player of this.state.players.values())
-      if (player.address.toLowerCase() === lower) return player;
+      if (player.playerKey === key) return player;
     return undefined;
   }
-
   /** Counts the message against the session's budget; undefined when it is over. */
   #admit(client: Client): Session | undefined {
     const session = this.#sessions.get(client.sessionId);
@@ -224,31 +154,6 @@ export class LandRoom extends Room<{ state: LandState }> {
     if (!session) return;
     const input = parseInputMessage(message);
     if (input) session.input = input;
-  }
-
-  #onMining(client: Client, message: unknown): void {
-    // Only the Land owner may switch mining (P5); everyone else is ignored silently.
-    if (!this.state.players.get(client.sessionId)?.isOwner) return;
-    if (!this.#admit(client)) return;
-    const request = parseMiningMessage(message);
-    if (!request) return;
-    const { mining } = this.#options;
-    if (request.on) mining.start(request.threads);
-    else
-      mining.stop().catch((error: unknown) => {
-        console.error("could not stop mining:", error);
-      });
-  }
-
-  #refreshMining(): void {
-    const status = this.#options.mining.status();
-    const state = this.state.mining;
-    state.on = status.on;
-    state.threads = status.threads;
-    state.hashRate = status.hashRate;
-    state.round = Number(status.round);
-    state.submitted = status.submitted;
-    state.won = status.won;
   }
 
   #tick(dtMs: number): void {

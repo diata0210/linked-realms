@@ -12,7 +12,8 @@
     "format:check": "prettier --check .",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "e2e:world": "pnpm --filter @linked-realms/map-server e2e:world"
+    "e2e:world": "pnpm --filter @linked-realms/map-server e2e:world",
+    "build": "pnpm --filter @linked-realms/client build"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

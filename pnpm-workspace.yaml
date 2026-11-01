@@ -1,5 +1,4 @@
 packages:
-  - contracts
   - packages/*
 allowBuilds:
   # Optional native accelerator for msgpackr (Colyseus); the pure JavaScript path is enough.

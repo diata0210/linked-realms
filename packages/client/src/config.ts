@@ -1,55 +1,26 @@
-// Vite env → validated config. Pure so it can be tested without a browser.
-
-export interface ClientConfig {
-  rpcUrl: string;
-  chainId: number;
-  hubUrl: string;
+import {
+  isAgentKey,
+  TEST_PLAYER_KEY,
+  type AgentKey,
+} from "@linked-realms/shared";
+export interface Config {
+  serverUrl: string;
+  playerKey: AgentKey;
 }
-
-type Env = Record<string, unknown>;
-
-function str(env: Env, key: string, fallback: string): string {
-  const v = env[key];
-  return typeof v === "string" && v !== "" ? v : fallback;
-}
-
-function positiveInt(env: Env, key: string, fallback: number): number {
-  const raw = str(env, key, String(fallback));
+export function parseConfig(env: Record<string, unknown>): Config {
+  const serverUrl = String(env.VITE_TEST_SERVER_URL || "http://127.0.0.1:2567");
+  const url = new URL(serverUrl);
   if (
-    !/^\d+$/.test(raw) ||
-    Number(raw) < 1 ||
-    !Number.isSafeInteger(Number(raw))
+    url.protocol !== "http:" ||
+    url.hostname !== "127.0.0.1" ||
+    url.username ||
+    url.password ||
+    url.pathname !== "/" ||
+    url.search ||
+    url.hash
   )
-    throw new Error(`${key} must be a positive integer, got "${raw}"`);
-  return Number(raw);
+    throw new Error("The test adapter requires a loopback HTTP server URL");
+  const playerKey = env.VITE_TEST_PLAYER_KEY || TEST_PLAYER_KEY;
+  if (!isAgentKey(playerKey)) throw new Error("Invalid VITE_TEST_PLAYER_KEY");
+  return { serverUrl: url.origin, playerKey };
 }
-
-function url(env: Env, key: string, fallback: string, protocols: string[]) {
-  const raw = str(env, key, fallback);
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error(`${key} must be a URL, got "${raw}"`);
-  }
-  if (!protocols.includes(parsed.protocol))
-    throw new Error(`${key} must use ${protocols.join(" or ")}, got "${raw}"`);
-  return raw;
-}
-
-export function parseConfig(env: Env): ClientConfig {
-  return {
-    rpcUrl: url(env, "VITE_RPC_URL", "http://127.0.0.1:8545", [
-      "http:",
-      "https:",
-    ]),
-    chainId: positiveInt(env, "VITE_CHAIN_ID", 31337),
-    hubUrl: url(env, "VITE_HUB_URL", "http://127.0.0.1:8787", [
-      "http:",
-      "https:",
-    ]),
-  };
-}
-
-/** The local dev wallet is only offered on the local anvil chain. */
-export const DEV_CHAIN_ID = 31337;

@@ -1,3 +1,5 @@
+> Current Connect build: follow `docs/connect-g1.md`, `README.md` and `CONTRIBUTING.md`. Owner-approved G1 supersedes the historical EVM instructions below. Contracts, legacy miner, indexer and TS Hub/relay are retired; their former commands no longer apply.
+
 # CLAUDE.md — linked-realms
 
 A game made of many lands: each player hosts their own land, and the lands join into one shared world through the company's Hub. Stage 1 has one land, one character (every stat equals 1) and one gold mine mined by Proof of Work like Bitcoin; a character can walk into other players' lands. EVM blockchain, testnet only. The project owner decides every merge.

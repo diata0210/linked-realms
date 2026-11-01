@@ -1,23 +1,16 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, resolve, join } from "node:path";
+import { LandStore } from "./land-store.ts";
 import { boot, type ColyseusTestServer } from "@colyseus/testing";
 import {
-  HUB_EIP712_DOMAIN,
   LAND_ROOM,
   Messages,
-  TRAVEL_TICKET_TTL_SECONDS,
-  TravelTicketTypes,
-  gateNumber,
-  gateOf,
-  gateSpawn,
   parseLandMap,
   spawnPosition,
-  ticketToWire,
-  type Direction,
-  type JoinOptions,
+  localTestAdjacency,
+  TEST_PLAYER_KEY,
 } from "@linked-realms/shared";
-import type { MinerStatus } from "@linked-realms/miner";
-import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import {
   afterAll,
   afterEach,
@@ -26,114 +19,61 @@ import {
   expect,
   it,
   onTestFinished,
-  vi,
 } from "vitest";
 import { clock, type LandRoom } from "./LandRoom.ts";
 import { createServer } from "./server.ts";
-
-const LAND_ID = 7;
 const mapText = readFileSync(
-  fileURLToPath(new URL("../../../maps/empty-land.json", import.meta.url)),
+  new URL("../../../maps/empty-land.json", import.meta.url),
   "utf8",
 );
 const map = parseLandMap(mapText);
 const spawn = spawnPosition(map);
-
-const owner = privateKeyToAccount(generatePrivateKey());
-const visitor = privateKeyToAccount(generatePrivateKey());
-
-const hub = privateKeyToAccount(generatePrivateKey());
-const forger = privateKeyToAccount(generatePrivateKey());
-const CHAIN_ID = 31337;
-const land = { owner: owner.address, x: 1, y: 0 };
-
-const fakeStatus: MinerStatus = {
-  on: false,
-  threads: 1,
-  hashRate: 0,
-  round: 0n,
-  submitted: 0,
-  won: 0,
-};
-const mining = {
-  start: vi.fn<(threads: number) => void>(),
-  stop: vi.fn(async () => {}),
-  status: vi.fn((): MinerStatus => fakeStatus),
-};
-
-type Account = typeof owner;
-
-/** A Travel ticket for `account`, signed by `signer` (the Hub unless a test forges it). */
-async function joinOptions(
-  account: Account,
-  {
-    landId = LAND_ID,
-    expiresIn = TRAVEL_TICKET_TTL_SECONDS,
-    gate = 0,
-    signer = hub,
-    nonce = generatePrivateKey(), // any 32 random bytes
-  } = {},
-): Promise<JoinOptions> {
-  const ticket = {
-    player: account.address,
-    landId: BigInt(landId),
-    gate,
-    expiresAt: BigInt(Math.floor(Date.now() / 1000) + expiresIn),
-    nonce,
-  };
-  const signature = await signer.signTypedData({
-    domain: HUB_EIP712_DOMAIN(CHAIN_ID),
-    types: TravelTicketTypes,
-    primaryType: "TravelTicket",
-    message: ticket,
-  });
-  return { ticket: ticketToWire(ticket), signature };
-}
-
+const owner = TEST_PLAYER_KEY;
+const visitor = "22".repeat(32);
+const adjacency = localTestAdjacency();
 const idle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-describe("LandRoom", () => {
+describe("local test LandRoom", () => {
   let colyseus: ColyseusTestServer;
-
-  // One server for the file: re-booting on the same port between tests is flaky.
+  let store: LandStore;
+  let dataDir: string;
   beforeAll(async () => {
-    const server = createServer({
-      landId: LAND_ID,
-      map,
-      mapText,
-      land,
-      hubSigner: hub.address,
-      chainId: CHAIN_ID,
-      mining,
-    });
-    colyseus = await boot(server);
+    dataDir = mkdtempSync(join(tmpdir(), "g2-room-"));
+    if (
+      dirname(resolve(dataDir)) !== resolve(tmpdir()) ||
+      !basename(dataDir).startsWith("g2-room-")
+    )
+      throw new Error("Unexpected test directory");
+    store = new LandStore(join(dataDir, "land.db"), adjacency.landKey);
+    colyseus = await boot(
+      createServer({ map, mapText, adjacency, ownerPlayerKey: owner, store }),
+    );
   });
-  afterEach(() => {
-    mining.start.mockClear();
-    mining.stop.mockClear();
-    mining.status.mockImplementation(() => fakeStatus);
-    return colyseus.cleanup();
+  afterEach(() => colyseus.cleanup());
+  afterAll(async () => {
+    try {
+      await colyseus.shutdown();
+    } finally {
+      store.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
-  afterAll(() => colyseus.shutdown());
-
   async function createRoom() {
     return colyseus.createRoom<LandRoom>(LAND_ROOM, {});
   }
-
   it("shows both players to both clients and marks only the Land owner", async () => {
     const room = await createRoom();
-    const a = await colyseus.connectTo(room, await joinOptions(owner));
-    const b = await colyseus.connectTo(room, await joinOptions(visitor));
+    const a = await colyseus.connectTo(room, { playerKey: owner });
+    const b = await colyseus.connectTo(room, { playerKey: visitor });
     await idle(200); // let a patch reach both clients
 
     for (const client of [a, b]) {
-      expect(client.state.landId).toBe(LAND_ID);
+      expect(client.state.landKey).toBe(adjacency.landKey);
       expect(client.state.players.size).toBe(2);
       const mine = client.state.players.get(a.sessionId)!;
       const theirs = client.state.players.get(b.sessionId)!;
-      expect(mine.address).toBe(owner.address);
+      expect(mine.playerKey).toBe(owner);
       expect(mine.isOwner).toBe(true);
-      expect(theirs.address).toBe(visitor.address);
+      expect(theirs.playerKey).toBe(visitor);
       expect(theirs.isOwner).toBe(false);
       expect(mine.x).toBe(spawn.x);
       expect(mine.y).toBe(spawn.y);
@@ -142,10 +82,9 @@ describe("LandRoom", () => {
 
   it("sends the map text and the Land info after joining", async () => {
     const room = await createRoom();
-    const client = await colyseus.sdk.joinById(
-      room.roomId,
-      await joinOptions(visitor),
-    );
+    const client = await colyseus.sdk.joinById(room.roomId, {
+      playerKey: visitor,
+    });
     const mapMessage = new Promise<{ tiled: string }>((resolve) =>
       client.onMessage(Messages.map, resolve),
     );
@@ -153,17 +92,12 @@ describe("LandRoom", () => {
       client.onMessage(Messages.land, resolve),
     );
     expect((await mapMessage).tiled).toBe(mapText);
-    expect(await landMessage).toEqual({
-      landId: LAND_ID,
-      owner: owner.address,
-      x: 1,
-      y: 0,
-    });
+    expect(await landMessage).toEqual(adjacency);
   });
 
   it("moves the player on the server and the Mine blocks it", async () => {
     const room = await createRoom();
-    const client = await colyseus.connectTo(room, await joinOptions(owner));
+    const client = await colyseus.connectTo(room, { playerKey: owner });
     client.send(Messages.input, {
       up: false,
       down: false,
@@ -175,6 +109,9 @@ describe("LandRoom", () => {
     expect(player.x).toBeGreaterThan(spawn.x);
     expect(player.y).toBe(spawn.y);
 
+    // Re-center under the Mine after proving horizontal movement.
+    player.x = spawn.x;
+    player.y = spawn.y;
     client.send(Messages.input, {
       up: true,
       down: false,
@@ -192,7 +129,7 @@ describe("LandRoom", () => {
 
   it("ignores invalid input", async () => {
     const room = await createRoom();
-    const client = await colyseus.connectTo(room, await joinOptions(owner));
+    const client = await colyseus.connectTo(room, { playerKey: owner });
     client.send(Messages.input, { up: "yes", down: 1 });
     client.send(Messages.input, "right");
     await idle(300);
@@ -210,7 +147,7 @@ describe("LandRoom", () => {
     onTestFinished(() => {
       clock.now = real;
     });
-    const client = await colyseus.connectTo(room, await joinOptions(owner));
+    const client = await colyseus.connectTo(room, { playerKey: owner });
     const stop = { up: false, down: false, left: false, right: false };
     for (let i = 0; i < 30; i++) client.send(Messages.input, stop);
     client.send(Messages.input, { ...stop, right: true });
@@ -218,238 +155,98 @@ describe("LandRoom", () => {
     expect(room.state.players.get(client.sessionId)!.x).toBe(spawn.x);
   });
 
-  it.each(["north", "east", "south", "west"] as Direction[])(
-    "spawns a Player arriving at the %s Gate one tile inside it",
-    async (direction) => {
-      const room = await createRoom();
-      const client = await colyseus.connectTo(
-        room,
-        await joinOptions(visitor, { gate: gateNumber(direction) }),
-      );
-      const player = room.state.players.get(client.sessionId)!;
-      const expected = gateSpawn(map, direction);
-      expect({ x: player.x, y: player.y }).toEqual(expected);
-      expect(gateOf(map, expected)).toBeUndefined(); // not on the Gate: no instant bounce back
-    },
-  );
-
-  it("ignores a client-supplied clock option", async () => {
+  it("starts local Character defaults without a gold balance", async () => {
+    const room = await createRoom();
+    const client = await colyseus.connectTo(room, { playerKey: visitor });
+    const player = room.state.players.get(client.sessionId)!;
+    expect(player.stats.toJSON()).toEqual({
+      strength: 1,
+      agility: 1,
+      intelligence: 1,
+      stamina: 1,
+    });
+    expect(player.inventory.size).toBe(0);
+    expect(player.toJSON()).not.toHaveProperty("gold");
+    expect(room.state.toJSON()).not.toHaveProperty("mining");
+    expect(room.maxClients).toBe(64);
+  });
+  it("ignores client authority, map and unverified arrival hints", async () => {
     const client = await colyseus.sdk.create(LAND_ROOM, {
-      ...(await joinOptions(owner)),
+      playerKey: visitor,
+      ownerPlayerKey: visitor,
+      isOwner: true,
+      adjacency: { version: 1, landKey: "ff".repeat(32), neighbors: {} },
+      gate: "west",
+      sourceLandKey: "bb".repeat(32),
+      verified: true,
+      map: {},
+      mapText: "invalid",
+      maxClients: 999,
       now: 1,
     });
-    expect(client.sessionId).toBeTruthy();
+    client.onMessage(Messages.map, () => {});
+    client.onMessage(Messages.land, () => {});
+    await idle(150);
+    const player = client.state.players.get(client.sessionId)!;
+    expect(client.state.landKey).toBe(adjacency.landKey);
+    expect(player.isOwner).toBe(false);
+    expect({ x: player.x, y: player.y }).toEqual(spawn);
   });
-
   it("refuses a second room", async () => {
     await createRoom();
-    // Valid join options, so only the room limit can be the reason.
     await expect(
-      colyseus.sdk.create(LAND_ROOM, await joinOptions(owner)),
-    ).rejects.toThrow(); // Colyseus masks the onCreate error text
+      colyseus.sdk.create(LAND_ROOM, { playerKey: owner }),
+    ).rejects.toThrow();
   });
-
-  it("removes the player on leave", async () => {
+  it("removes a Player on leave and permits a fresh local join", async () => {
     const room = await createRoom();
-    const client = await colyseus.connectTo(room, await joinOptions(owner));
-    expect(room.state.players.size).toBe(1);
+    const client = await colyseus.connectTo(room, { playerKey: owner });
+    const second = await colyseus.connectTo(room, { playerKey: visitor });
     await client.leave();
     await idle(100);
+    expect(room.state.players.size).toBe(1);
+    await colyseus.connectTo(room, { playerKey: owner });
+    expect(room.state.players.size).toBe(2);
+    await second.leave();
+  });
+  it.each([
+    {},
+    { playerKey: "0x1234" },
+    { playerKey: "A".repeat(64) },
+    { playerKey: 7 },
+  ])("rejects malformed identity %j", async (options) => {
+    const room = await createRoom();
+    await expect(colyseus.connectTo(room, options)).rejects.toThrow(
+      "Invalid test player key",
+    );
     expect(room.state.players.size).toBe(0);
   });
-
-  describe("rejects", () => {
-    async function rejected(options: unknown) {
-      const room = await createRoom();
-      const error = await colyseus.connectTo(room, options).then(
-        () => undefined,
-        (e: unknown) => e as Error,
-      );
-      expect(error).toBeDefined();
-      expect(room.state.players.size).toBe(0);
-      return error!;
-    }
-
-    it("a ticket not signed by the Hub", async () => {
-      const error = await rejected(
-        await joinOptions(owner, { signer: forger }),
-      );
-      expect(error.message).toMatch(/not signed by the Hub/);
-    });
-
-    it("a ticket whose fields were changed after signing", async () => {
-      const good = await joinOptions(owner);
-      const error = await rejected({
-        ...good,
-        ticket: { ...good.ticket, gate: 2 },
-      });
-      expect(error.message).toMatch(/not signed by the Hub/);
-    });
-
-    it("a ticket for another Land", async () => {
-      const error = await rejected(await joinOptions(owner, { landId: 8 }));
-      expect(error.message).toMatch(/another Land/);
-    });
-
-    it("an expired ticket", async () => {
-      const error = await rejected(
-        await joinOptions(owner, { expiresIn: -10 }),
-      );
-      expect(error.message).toMatch(/expired/);
-    });
-
-    it("a ticket that expires too far ahead", async () => {
-      await rejected(
-        await joinOptions(owner, {
-          expiresIn: TRAVEL_TICKET_TTL_SECONDS + 100,
-        }),
-      );
-    });
-
-    it("a reused ticket", async () => {
-      const options = await joinOptions(owner);
-      const room = await createRoom();
-      await colyseus.connectTo(room, options);
-      const error = await colyseus.connectTo(room, options).then(
-        () => undefined,
-        (e: unknown) => e as Error,
-      );
-      expect(error?.message).toMatch(/already used/);
-      expect(room.state.players.size).toBe(1);
-    });
-
-    it("a malformed ticket or signature", async () => {
-      const good = await joinOptions(owner);
-      for (const bad of [
-        { ...good, ticket: { ...good.ticket, player: "0x1234" } },
-        { ...good, ticket: { ...good.ticket, gate: 9 } },
-        { ...good, ticket: { ...good.ticket, expiresAt: "-1" } },
-        { ...good, ticket: { ...good.ticket, nonce: "0x01" } },
-        { ...good, ticket: "ticket" },
-        { ...good, signature: "0x1234" },
-        { ticket: good.ticket },
-      ]) {
-        const error = await rejected(bad);
-        expect(error.message).toMatch(/malformed/);
-        expect(error.stack ?? "").not.toMatch(/LandRoom\.ts/);
-      }
-    });
-
-    it("missing join options", async () => {
-      await rejected({});
-    });
-
-    it("a second session for the same address", async () => {
-      const room = await createRoom();
-      await colyseus.connectTo(room, await joinOptions(owner));
-      const error = await colyseus
-        .connectTo(room, await joinOptions(owner))
-        .then(
-          () => undefined,
-          (e: unknown) => e as Error,
-        );
-      expect(error?.message).toMatch(/already in this Land/);
-      expect(room.state.players.size).toBe(1);
-    });
-
-    it("two simultaneous sessions for the same address", async () => {
-      const room = await createRoom();
-      const results = await Promise.allSettled([
-        colyseus.connectTo(room, await joinOptions(owner)),
-        colyseus.connectTo(room, await joinOptions(owner)),
-      ]);
-      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
-      expect(room.state.players.size).toBe(1);
-    });
+  it("restores stats and inventory on a fresh join to this Land", async () => {
+    const room = await createRoom();
+    await colyseus.connectTo(room, { playerKey: owner });
+    const key = "33".repeat(32),
+      client = await colyseus.connectTo(room, { playerKey: key });
+    const player = room.state.players.get(client.sessionId)!;
+    player.stats.set("strength", 7);
+    player.inventory.set("wood", 3);
+    await client.leave();
+    await idle(100);
+    const joined = await colyseus.connectTo(room, { playerKey: key });
+    const loaded = room.state.players.get(joined.sessionId)!;
+    expect(loaded.stats.get("strength")).toBe(7);
+    expect(loaded.inventory.get("wood")).toBe(3);
+    expect(store.loadOrCreate(key).stats.strength).toBe(7);
   });
-
-  describe("mining", () => {
-    it("ignores a switch from anyone but the Land owner", async () => {
-      const room = await createRoom();
-      const client = await colyseus.connectTo(room, await joinOptions(visitor));
-      client.send(Messages.mining, { on: true, threads: 2 });
-      client.send(Messages.mining, { on: false, threads: 2 });
-      await idle(200);
-      expect(mining.start).not.toHaveBeenCalled();
-      expect(mining.stop).not.toHaveBeenCalled();
-    });
-
-    it("starts and stops mining for the Land owner", async () => {
-      const room = await createRoom();
-      const client = await colyseus.connectTo(room, await joinOptions(owner));
-      client.send(Messages.mining, { on: true, threads: 2 });
-      await idle(200);
-      expect(mining.start).toHaveBeenCalledExactlyOnceWith(2);
-      client.send(Messages.mining, { on: false, threads: 2 });
-      await idle(200);
-      expect(mining.stop).toHaveBeenCalledOnce();
-    });
-
-    it("survives a failing stop", async () => {
-      mining.stop.mockRejectedValueOnce(new Error("boom"));
-      const error = vi.spyOn(console, "error").mockImplementation(() => {});
-      onTestFinished(() => error.mockRestore());
-      const room = await createRoom();
-      const client = await colyseus.connectTo(room, await joinOptions(owner));
-      client.send(Messages.mining, { on: false, threads: 1 });
-      await idle(200);
-      expect(error).toHaveBeenCalledOnce();
-    });
-
-    it("ignores malformed messages", async () => {
-      const room = await createRoom();
-      const client = await colyseus.connectTo(room, await joinOptions(owner));
-      for (const bad of [
-        null,
-        "on",
-        {},
-        { on: "yes", threads: 1 },
-        { on: true, threads: 0 },
-        { on: true, threads: 1.5 },
-        { on: true },
-      ])
-        client.send(Messages.mining, bad);
-      await idle(200);
-      expect(mining.start).not.toHaveBeenCalled();
-      expect(mining.stop).not.toHaveBeenCalled();
-    });
-
-    it("mirrors the miner status in the room state", async () => {
-      mining.status.mockImplementation(() => ({
-        on: true,
-        threads: 3,
-        hashRate: 1234.5,
-        round: 42n,
-        submitted: 5,
-        won: 4,
-      }));
-      const room = await createRoom();
-      const client = await colyseus.connectTo(room, await joinOptions(visitor));
-      await idle(800); // one refresh (500 ms) plus a patch
-      expect(client.state.mining.toJSON()).toEqual({
-        on: true,
-        threads: 3,
-        hashRate: 1234.5,
-        round: 42,
-        submitted: 5,
-        won: 4,
-      });
-    });
-
-    it("counts mining messages toward the rate limit", async () => {
-      const room = await createRoom();
-      const real = clock.now;
-      const frozen = Date.now();
-      clock.now = () => frozen;
-      onTestFinished(() => {
-        clock.now = real;
-      });
-      const client = await colyseus.connectTo(room, await joinOptions(owner));
-      const stop = { up: false, down: false, left: false, right: false };
-      for (let i = 0; i < 30; i++) client.send(Messages.input, stop);
-      client.send(Messages.mining, { on: true, threads: 1 });
-      await idle(300);
-      expect(mining.start).not.toHaveBeenCalled();
-    });
+  it("rejects duplicate and concurrent sessions for the same key", async () => {
+    const room = await createRoom();
+    const results = await Promise.allSettled([
+      colyseus.connectTo(room, { playerKey: owner }),
+      colyseus.connectTo(room, { playerKey: owner }),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(room.state.players.size).toBe(1);
+    await expect(
+      colyseus.connectTo(room, { playerKey: owner }),
+    ).rejects.toThrow("already in this Land");
   });
 });

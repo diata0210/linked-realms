@@ -1,3 +1,5 @@
+> Historical EVM plan. The owner-approved Connect G1 implementation is documented in [docs/connect-g1.md](docs/connect-g1.md); its key identity, local state and separate chain boundaries supersede EVM requirements below.
+
 # PLAN.md — Execution plan for `linked-realms`
 
 > `linked-realms` is a working name and can be changed at any time.
@@ -295,6 +297,8 @@ Also decided on 2026-10-29: Node.js 26 LTS; the repo is public from day one; all
 
 ## 12. Progress
 
+- [x] Connect G1: remove EVM startup/authority; local agent-key test adapter, gold stub and shared adjacency fixtures. See `docs/connect-g1.md` for verification and remaining integration.
+
 - [x] Phase 0 – Foundations
 - [ ] Phase 1 – Stage 1
   - [x] 1A – Land and characters
@@ -304,6 +308,8 @@ Also decided on 2026-10-29: Node.js 26 LTS; the repo is public from day one; all
 - [ ] Phase 3 – Mainnet preparation
 
 ### Log
+
+- 2026-11-01: Connect G1 removes retired EVM/TS Hub/relay/miner/indexer packages, wallet/SIWE/NFT UI and startup dependencies. Map validation, movement, room/input limits and configured owner status remain. Added strict version-1 key adjacency/LandMessage, reciprocal fixtures, unavailable gold seam and local SDK smoke scripts. G2/G3/G4/C4 remain separate; no production admission or durable gold is claimed.
 
 <!-- Claude Code records the date and the completed work here, newest first. -->
 
